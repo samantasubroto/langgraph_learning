@@ -6,14 +6,20 @@ import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+import sqlite3
 
 load_dotenv()
 
 st.set_page_config(page_title="LangGraph Chatbot", page_icon="💬")
 
+# Sqllite db
+connection = sqlite3.connect(database='chatbot.db', check_same_thread=False)
+
+# Checkpointer
+checkpointer = SqliteSaver(conn=connection)
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
@@ -32,11 +38,23 @@ def build_chatbot():
     graph.add_node("chat_node", chat_node)
     graph.add_edge(START, "chat_node")
     graph.add_edge("chat_node", END)
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer)
 
 
 def generate_thread_id() -> str:
     return str(uuid.uuid4())
+
+
+def get_all_thread_ids() -> list[str]:
+    """Read every distinct thread_id that SqliteSaver has written to chatbot.db.
+
+    Ordered by checkpoint_id, which LangGraph generates so it sorts
+    chronologically, so the result is oldest-to-newest.
+    """
+    cursor = connection.execute(
+        "SELECT DISTINCT thread_id FROM checkpoints ORDER BY checkpoint_id"
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 
 def thread_title(thread_id: str) -> str:
@@ -64,8 +82,14 @@ if not os.getenv("OPENAI_API_KEY"):
 chatbot = build_chatbot()
 
 if "thread_id" not in st.session_state:
-    st.session_state.thread_id = generate_thread_id()
-    st.session_state.chat_threads = [st.session_state.thread_id]
+    existing_threads = get_all_thread_ids()
+    if existing_threads:
+        # Resume from the database: show every past thread, land on the newest one.
+        st.session_state.chat_threads = existing_threads
+        st.session_state.thread_id = existing_threads[-1]
+    else:
+        st.session_state.thread_id = generate_thread_id()
+        st.session_state.chat_threads = [st.session_state.thread_id]
 
 config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
